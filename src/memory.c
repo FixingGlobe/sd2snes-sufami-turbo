@@ -419,7 +419,7 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
         */
         if(sufami_turbo_srm_collision(current_filename, slotb_filename)) {
           printf("Sufami Turbo: Slot A & Slot B\nproduce the same .srm savefile,\n rejecting Slot B\n");
-          snes_menu_errmsg(MENU_ERR_NOIMPL, (void*)"Slot A & Slot B\ncannot share the same filename.");
+          snes_menu_errmsg(MENU_ERR_SUPPLFILE, (void*)"Slot A & Slot B\ncannot share the same filename.\n");
           slotb_filename[0] = 0;
           slotb_ramsize_bytes = 0;
         } else {
