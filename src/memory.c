@@ -52,6 +52,7 @@ memory.c: RAM operations
 #include "sgb.h"
 
 #include <string.h>
+#include <ctype.h>
 char* hex = "0123456789ABCDEF";
 
 extern snes_romprops_t romprops;
@@ -233,6 +234,44 @@ uint16_t sram_writeblock(void* buf, uint32_t addr, uint16_t size) {
   return size;
 }
 
+
+/*
+* sufami_turbo_srm_collision
+* 
+* Builds the actual .srm save path for both Slot A and Slot B
+* usign the same logic as save_srm() / migrate_and_load_srm().
+* Compares them case.insensitivly.
+* 
+* Returns 1 if both slots would wirte to the same .srm file, 0 if not.
+*/
+static int sufami_turbo_srm_collision(const char *slota, const char *slotb)
+{
+  char srm_a[256] = SAVE_BASEDIR;
+  char srm_b[256] = SAVE_BASEDIR;
+
+  /* Builds path A - mirrors append_file_basename() precisely */
+  const char *base_a = strrchr(slota, '/');
+  base_a = base_a ? base_a + 1 : slota;
+  strncat(srm_a, base_a, sizeof(srm_a) - strlen(srm_a) - 1);
+  strcpy(strrchr(srm_a, '.'), ".srm");
+
+  /* Build path B - ditto */
+  const char *base_b = strrchr(slotb, '/');
+  base_b = base_b ? base_b + 1 : slotb;
+  strncat(srm_b, base_b, sizeof(srm_b) - strlen(srm_b) - 1);
+  strcpy(strrchr(srm_b, '.'), ".srm");
+
+  /* compare case-insensitively */
+  const char *p = srm_a;
+  const char *q = srm_b;
+  while (*p && *q) {
+    if(tolower((unsigned char)*p) != tolower((unsigned char)*q))
+      return 0;
+    p++; q++;
+  }
+  return (*p == '\0' && *q == '\0');
+}
+
 char current_filename[258];
 char slotb_filename[258];
 uint32_t slotb_ramsize_bytes = 0; /* Slot B SRAM size in bytes; 0 when no Slot B or no SRAM */
@@ -368,39 +407,52 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
   }
   uint32_t slotb_rammask = 0;
   if(romprops.mapper_id==5) {
-    printf("Sufami Turbo ROM\n");
-    printf("Loading ST BIOS %s...\n", STBIOS_FW);
-    load_sram_offload((uint8_t*)STBIOS_FW, 0x000000, LOADRAM_AUTOSKIP_HEADER);
-    if(file_res) snes_menu_errmsg(MENU_ERR_SUPPLFILE, (void*)STBIOS_FW);
-    if(slotb_filename[0]) {
-      uint8_t slotb_buf[258];
-      strncpy((char*)slotb_buf, slotb_filename, sizeof(slotb_buf)-1);
-      slotb_buf[sizeof(slotb_buf)-1] = 0;
-      printf("Loading Slot B ROM %s...\n", slotb_buf);
-      uint32_t slotb_filesize = load_sram_offload(slotb_buf, 0x600000, LOADRAM_AUTOSKIP_HEADER);
-      if(file_res) {
-        printf("Slot B ROM load failed, disabling\n");
-        sram_memset(0x600000, 0x100, 0x00);
-        set_rom_mask_b(0);
-      } else {
-        /* Compute Slot B ROM mask: next power of 2 >= filesize */
-        uint32_t slotb_sz = 1;
-        while(slotb_sz < slotb_filesize) slotb_sz <<= 1;
-        set_rom_mask_b(slotb_sz - 1);
-        /* Read Slot B SRAM size from ST header byte 0x37 (2KB units) */
-        uint32_t slotb_ramsize = (uint32_t)sram_readbyte(0x600037) * 2048;
-        slotb_rammask = slotb_ramsize ? (slotb_ramsize - 1) : 0;
-        slotb_ramsize_bytes = slotb_ramsize;
-        /* Initialize Slot B SRAM region (0xE80000) and load from .srm file */
-        if(slotb_ramsize) {
-          sram_memset(0xE80000, slotb_ramsize, 0xFF);
-          strncpy((char*)slotb_buf, slotb_filename, sizeof(slotb_buf)-1);
-          slotb_buf[sizeof(slotb_buf)-1] = 0;
-          migrate_and_load_srm(slotb_buf, 0xE80000);
-          if(file_res == FR_NO_FILE) file_res = 0;
+      printf("Sufami Turbo ROM\n");
+      printf("Loading ST BIOS %s...\n", STBIOS_FW);
+      load_sram_offload((uint8_t*)STBIOS_FW, 0x000000, LOADRAM_AUTOSKIP_HEADER);
+      if(file_res) snes_menu_errmsg(MENU_ERR_SUPPLFILE, (void*)STBIOS_FW);
+      if(slotb_filename[0]) {
+        /*
+        * Preventing both slots from writing to the same .srm save file.
+        * Compares the constructed .srm paths, not the ROM paths (case-insensitive)
+        * alows potential future compatibility with directory based .srm files
+        */
+        if(sufami_turbo_srm_collision(current_filename, slotb_filename)) {
+          printf("Sufami Turbo: Slot A & Slot B\nproduce the same .srm savefile,\n rejecting Slot B\n");
+          snes_menu_errmsg(MENU_ERR_NOIMPL, (void*)"Slot A & Slot B\ncannot share the same filename.");
+          slotb_filename[0] = 0;
+          slotb_ramsize_bytes = 0;
+        } else {
+        uint8_t slotb_buf[258];
+        strncpy((char*)slotb_buf, slotb_filename, sizeof(slotb_buf)-1);
+        slotb_buf[sizeof(slotb_buf)-1] = 0;
+        printf("Loading Slot B ROM %s...\n", slotb_buf);
+        uint32_t slotb_filesize = load_sram_offload(slotb_buf, 0x600000, LOADRAM_AUTOSKIP_HEADER);
+        if(file_res) {
+          printf("Slot B ROM load failed, disabling\n");
+          sram_memset(0x600000, 0x100, 0x00);
+          set_rom_mask_b(0);
+        } else {
+          /* Compute Slot B ROM mask: next power of 2 >= filesize */
+          uint32_t slotb_sz = 1;
+          while(slotb_sz < slotb_filesize) slotb_sz <<= 1;
+          set_rom_mask_b(slotb_sz - 1);
+          /* Read Slot B SRAM size from ST header byte 0x37 (2KB units) */
+          uint32_t slotb_ramsize = (uint32_t)sram_readbyte(0x600037) * 2048;
+          slotb_rammask = slotb_ramsize ? (slotb_ramsize - 1) : 0;
+          slotb_ramsize_bytes = slotb_ramsize;
+          /* Initialize Slot B SRAM region (0xE80000) and load from .srm file */
+          if(slotb_ramsize) {
+            sram_memset(0xE80000, slotb_ramsize, 0xFF);
+            strncpy((char*)slotb_buf, slotb_filename, sizeof(slotb_buf)-1);
+            slotb_buf[sizeof(slotb_buf)-1] = 0;
+            migrate_and_load_srm(slotb_buf, 0xE80000);
+            if(file_res == FR_NO_FILE) file_res = 0;
+          }
         }
       }
-    } else {
+    }
+    if(!slotb_filename[0]) {
       /* No Slot B: zero header area so STBIOS cannot match "BANDAI SFC-ADX" signature */
       sram_memset(0x600000, 0x40, 0x00);
       set_rom_mask_b(0);
